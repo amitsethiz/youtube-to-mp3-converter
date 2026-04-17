@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import shutil
 import logging
+import base64
 from pathlib import Path
 from urllib.parse import urlparse
 import yt_dlp
@@ -42,17 +43,46 @@ class YouTubeConverter:
         os.makedirs(self.temp_dir, exist_ok=True)
         os.makedirs(self.downloads_dir, exist_ok=True)
         
+        # Setup YouTube cookies for bot-detection bypass
+        self.cookies_file = self._setup_cookies()
+        
         # yt-dlp base options (used for info extraction and download)
         self.ydl_base_opts = {
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
-            # android_vr client bypasses PO Token requirement (avoids HTTP 403)
-            'extractor_args': {'youtube': {'player_client': ['android_vr']}},
+            # Try multiple clients for bot bypass; android_vr first, then ios/mweb
+            'extractor_args': {'youtube': {'player_client': ['android_vr', 'ios', 'mweb']}},
             # Point yt-dlp to the bundled imageio-ffmpeg binary
             'ffmpeg_location': FFMPEG_PATH,
         }
+        
+        # Inject cookies if available (most reliable bot-bypass method)
+        if self.cookies_file:
+            self.ydl_base_opts['cookiefile'] = self.cookies_file
+            logger.info("YouTube cookies loaded — authenticated mode active")
+        else:
+            logger.warning("No YOUTUBE_COOKIES_BASE64 set — running unauthenticated (may be blocked by YouTube)")
+    
+    def _setup_cookies(self):
+        """
+        Decode YOUTUBE_COOKIES_BASE64 env var and write to a temp cookies file.
+        Returns the path to the cookies file, or None if not configured.
+        """
+        cookies_b64 = os.environ.get('YOUTUBE_COOKIES_BASE64', '').strip()
+        if not cookies_b64:
+            return None
+        try:
+            cookies_bytes = base64.b64decode(cookies_b64)
+            cookies_path = os.path.join(tempfile.gettempdir(), 'yt_cookies.txt')
+            with open(cookies_path, 'wb') as f:
+                f.write(cookies_bytes)
+            logger.info(f"Cookies file written to {cookies_path}")
+            return cookies_path
+        except Exception as e:
+            logger.error(f"Failed to set up cookies from env var: {e}")
+            return None
     
     def get_video_info(self, url):
         """
