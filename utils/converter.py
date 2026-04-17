@@ -11,6 +11,7 @@ Fallback chain (fully automatic, no user action required):
 
 import os
 import re
+import base64
 import subprocess
 import tempfile
 import logging
@@ -32,9 +33,9 @@ except Exception:
 # ---------------------------------------------------------------------------
 PIPED_INSTANCES = [
     'https://pipedapi.kavin.rocks',
-    'https://pipedapi.adminforge.de',
     'https://pipedapi.tokhmi.xyz',
-    'https://api.piped.yt',
+    'https://piped-api.garudalinux.org',
+    'https://pa.il.schu.be',
 ]
 
 # ---------------------------------------------------------------------------
@@ -77,8 +78,53 @@ class YouTubeConverter:
             },
             'ffmpeg_location': FFMPEG_PATH,
         }
+        # Setup authentication (OAuth2 token or cookies) — invisible to end users
+        self._setup_auth()
+
         # Cache for dynamic Invidious instances fetched at runtime
         self._invidious_instances_cache = None
+
+    def _setup_auth(self):
+        """
+        Load auth credentials from environment variables.
+        Priority: OAuth2 token (YOUTUBE_OAUTH_TOKEN) > cookies (YOUTUBE_COOKIES_BASE64)
+        Both are set ONCE by the app owner in Render env vars — end users do nothing.
+        """
+        # --- OAuth2 token (preferred: auto-refreshes, no expiry) ---
+        oauth_b64 = os.environ.get('YOUTUBE_OAUTH_TOKEN', '').strip()
+        if oauth_b64:
+            try:
+                # Write token to yt-dlp cache dir so the OAuth2 plugin picks it up
+                cache_dir = os.path.join(tempfile.gettempdir(), 'yt-dlp-oauth2-cache')
+                os.makedirs(cache_dir, exist_ok=True)
+                token_path = os.path.join(cache_dir, 'youtube-oauth2.json')
+                with open(token_path, 'wb') as f:
+                    f.write(base64.b64decode(oauth_b64))
+                self.ydl_base_opts['username'] = 'oauth2'
+                self.ydl_base_opts['password'] = ''
+                self.ydl_base_opts['ap_mso'] = None  # ensure OAuth2 plugin activates
+                logger.info('OAuth2 token loaded — authenticated mode active')
+                return
+            except Exception as e:
+                logger.error(f'OAuth2 setup failed: {e}')
+
+        # --- Cookies fallback (YOUTUBE_COOKIES_BASE64) ---
+        cookies_b64 = os.environ.get('YOUTUBE_COOKIES_BASE64', '').strip()
+        if cookies_b64:
+            try:
+                cookies_path = os.path.join(tempfile.gettempdir(), 'yt_cookies.txt')
+                with open(cookies_path, 'wb') as f:
+                    f.write(base64.b64decode(cookies_b64))
+                self.ydl_base_opts['cookiefile'] = cookies_path
+                logger.info('YouTube cookies loaded — authenticated mode active')
+                return
+            except Exception as e:
+                logger.error(f'Cookie setup failed: {e}')
+
+        logger.warning(
+            'No YOUTUBE_OAUTH_TOKEN or YOUTUBE_COOKIES_BASE64 set. '
+            'Falling back to Piped/Invidious proxies (may be unreliable).'
+        )
 
     # -----------------------------------------------------------------------
     # Public API
@@ -272,22 +318,25 @@ class YouTubeConverter:
             try:
                 r = requests.get(f'{instance}/streams/{video_id}', timeout=10,
                                  headers={'User-Agent': 'Mozilla/5.0'})
-                if r.status_code == 200:
-                    data = r.json()
-                    if data.get('error'):
-                        continue
-                    logger.info(f"Piped info OK via {instance}")
-                    info = {
-                        'title': data.get('title', 'Unknown Title'),
-                        'duration': data.get('duration', 0),
-                        'thumbnail': data.get('thumbnailUrl', ''),
-                        'uploader': data.get('uploader', 'Unknown Uploader'),
-                        'view_count': data.get('views', 0),
-                        'upload_date': '',
-                        'description': (data.get('description') or '')[:200],
-                        'webpage_url': f'https://www.youtube.com/watch?v={video_id}',
-                    }
-                    return info, data
+                if r.status_code != 200:
+                    logger.warning(f"Piped info ({instance}) returned HTTP {r.status_code}")
+                    continue
+                data = r.json()
+                if data.get('error'):
+                    logger.warning(f"Piped info ({instance}) returned error: {data['error']}")
+                    continue
+                logger.info(f"Piped info OK via {instance}")
+                info = {
+                    'title': data.get('title', 'Unknown Title'),
+                    'duration': data.get('duration', 0),
+                    'thumbnail': data.get('thumbnailUrl', ''),
+                    'uploader': data.get('uploader', 'Unknown Uploader'),
+                    'view_count': data.get('views', 0),
+                    'upload_date': '',
+                    'description': (data.get('description') or '')[:200],
+                    'webpage_url': f'https://www.youtube.com/watch?v={video_id}',
+                }
+                return info, data
             except Exception as e:
                 logger.warning(f"Piped info failed ({instance}): {e}")
         return None, None
@@ -439,23 +488,25 @@ class YouTubeConverter:
             try:
                 r = requests.get(f'{instance}/api/v1/videos/{video_id}',
                                  timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
-                if r.status_code == 200:
-                    data = r.json()
-                    thumbs = data.get('videoThumbnails', [])
-                    thumb = next((t['url'] for t in thumbs if t.get('quality') == 'high'), '')
-                    if thumb and thumb.startswith('/'):
-                        thumb = instance + thumb
-                    logger.info(f"Invidious info OK via {instance}")
-                    return {
-                        'title': data.get('title', 'Unknown Title'),
-                        'duration': data.get('lengthSeconds', 0),
-                        'thumbnail': thumb,
-                        'uploader': data.get('author', 'Unknown Uploader'),
-                        'view_count': data.get('viewCount', 0),
-                        'upload_date': '',
-                        'description': (data.get('description') or '')[:200],
-                        'webpage_url': f'https://www.youtube.com/watch?v={video_id}',
-                    }
+                if r.status_code != 200:
+                    logger.warning(f"Invidious info ({instance}) returned HTTP {r.status_code}")
+                    continue
+                data = r.json()
+                thumbs = data.get('videoThumbnails', [])
+                thumb = next((t['url'] for t in thumbs if t.get('quality') == 'high'), '')
+                if thumb and thumb.startswith('/'):
+                    thumb = instance + thumb
+                logger.info(f"Invidious info OK via {instance}")
+                return {
+                    'title': data.get('title', 'Unknown Title'),
+                    'duration': data.get('lengthSeconds', 0),
+                    'thumbnail': thumb,
+                    'uploader': data.get('author', 'Unknown Uploader'),
+                    'view_count': data.get('viewCount', 0),
+                    'upload_date': '',
+                    'description': (data.get('description') or '')[:200],
+                    'webpage_url': f'https://www.youtube.com/watch?v={video_id}',
+                }
             except Exception as e:
                 logger.warning(f"Invidious info failed ({instance}): {e}")
         return None

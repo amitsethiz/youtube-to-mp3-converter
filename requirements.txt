@@ -5,6 +5,9 @@ Flask>=2.3.0,<4.0.0
 # YouTube Download Library  
 yt-dlp>=2023.0.0
 
+# OAuth2 authentication plugin for yt-dlp (bypasses bot detection — auto-refreshes)
+yt-dlp-youtube-oauth2>=0.4.2
+
 # Bundled FFmpeg binary (no system install needed — works on Render free tier)
 imageio-ffmpeg>=0.4.9
 
