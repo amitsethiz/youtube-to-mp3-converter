@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""
+Simple test script to verify YouTube to MP3 converter installation
+"""
+
+import sys
+import os
+
+def test_python_dependencies():
+    """Test if required Python packages are installed"""
+    print("🔍 Testing Python dependencies...")
+    
+    required_packages = [
+        'flask',
+        'yt_dlp', 
+        'validators',
+        'flask_cors',
+        'dotenv'
+    ]
+    
+    missing_packages = []
+    
+    for package in required_packages:
+        try:
+            if package == 'dotenv':
+                import dotenv
+            else:
+                __import__(package)
+            print(f"  ✅ {package}")
+        except ImportError:
+            print(f"  ❌ {package} - MISSING")
+            missing_packages.append(package)
+    
+    if missing_packages:
+        print(f"\n⚠️  Missing packages: {', '.join(missing_packages)}")
+        print("Run: pip install -r requirements.txt")
+        return False
+    else:
+        print("✅ All Python dependencies OK!")
+        return True
+
+def test_ffmpeg():
+    """Test if FFmpeg is installed"""
+    print("\n🔍 Testing FFmpeg installation...")
+    
+    import subprocess
+    try:
+        result = subprocess.run(['ffmpeg', '-version'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            print("✅ FFmpeg is installed and working!")
+            return True
+        else:
+            print("❌ FFmpeg found but not working properly")
+            return False
+    except FileNotFoundError:
+        print("❌ FFmpeg NOT FOUND")
+        print("\n⚠️  FFmpeg is REQUIRED for audio conversion!")
+        print("\nInstall FFmpeg:")
+        print("1. PowerShell (as Admin): choco install ffmpeg -y")
+        print("2. Or download from: https://ffmpeg.org/download.html")
+        print("3. Add to PATH: C:\\ffmpeg\\bin")
+        return False
+    except Exception as e:
+        print(f"❌ Error testing FFmpeg: {e}")
+        return False
+
+def test_app_structure():
+    """Test if app files exist"""
+    print("\n🔍 Testing application structure...")
+    
+    required_files = [
+        'app.py',
+        'config.py', 
+        'requirements.txt',
+        'templates/index.html',
+        'static/css/style.css',
+        'static/js/main.js',
+        'utils/converter.py',
+        'utils/validator.py'
+    ]
+    
+    missing_files = []
+    
+    for file_path in required_files:
+        if os.path.exists(file_path):
+            print(f"  ✅ {file_path}")
+        else:
+            print(f"  ❌ {file_path} - MISSING")
+            missing_files.append(file_path)
+    
+    if missing_files:
+        print(f"\n⚠️  Missing files: {', '.join(missing_files)}")
+        return False
+    else:
+        print("✅ All application files present!")
+        return True
+
+def test_flask_app():
+    """Test if Flask app can be imported"""
+    print("\n🔍 Testing Flask application...")
+    
+    try:
+        # Change to app directory
+        original_dir = os.getcwd()
+        os.chdir(os.path.dirname(os.path.abspath(__file__)))
+        
+        # Try to import the app
+        sys.path.insert(0, os.getcwd())
+        import app
+        
+        print("✅ Flask application loads successfully!")
+        print("✅ All imports working!")
+        
+        # Restore original directory
+        os.chdir(original_dir)
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error loading Flask app: {e}")
+        print("\nPossible solutions:")
+        print("1. Check if all dependencies are installed")
+        print("2. Verify Python version compatibility")
+        print("3. Run: pip install -r requirements.txt")
+        return False
+
+def main():
+    """Run all tests"""
+    print("🚀 YouTube to MP3 Converter - Installation Test")
+    print("=" * 50)
+    
+    results = []
+    results.append(("Python Dependencies", test_python_dependencies()))
+    results.append(("FFmpeg Installation", test_ffmpeg()))
+    results.append(("Application Structure", test_app_structure()))
+    results.append(("Flask Application", test_flask_app()))
+    
+    print("\n" + "=" * 50)
+    print("📊 TEST SUMMARY:")
+    print("=" * 50)
+    
+    all_passed = True
+    for test_name, passed in results:
+        status = "✅ PASS" if passed else "❌ FAIL"
+        print(f"{test_name:<25} {status}")
+        if not passed:
+            all_passed = False
+    
+    print("\n" + "=" * 50)
+    if all_passed:
+        print("🎉 ALL TESTS PASSED!")
+        print("Your YouTube to MP3 converter is ready to use!")
+        print("\nRun the app with: python app.py")
+        print("Then visit: http://127.0.0.1:5000")
+    else:
+        print("⚠️  SOME TESTS FAILED!")
+        print("Please fix the issues above before running the app.")
+        print("\nCommon solutions:")
+        print("1. Install missing packages: pip install -r requirements.txt")
+        print("2. Install FFmpeg: choco install ffmpeg -y")
+        print("3. Check file structure integrity")
+        
+    return 0 if all_passed else 1
+
+if __name__ == "__main__":
+    exit_code = main()
+    sys.exit(exit_code)

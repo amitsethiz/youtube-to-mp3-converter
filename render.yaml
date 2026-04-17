@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: youtube-to-mp3-converter
+    env: python
+    plan: free
+    buildCommand: bash build.sh
+    startCommand: gunicorn app:app --workers 1 --bind 0.0.0.0:$PORT --timeout 300 --keep-alive 5
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: FLASK_DEBUG
+        value: "false"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: SECURITY_PASSWORD_SALT
+        generateValue: true
+      - key: LOG_LEVEL
+        value: INFO
