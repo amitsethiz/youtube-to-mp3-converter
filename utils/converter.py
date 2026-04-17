@@ -13,6 +13,13 @@ from urllib.parse import urlparse
 import yt_dlp
 import re
 
+# Use imageio-ffmpeg bundled binary (works on Render free tier without system install)
+try:
+    import imageio_ffmpeg
+    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+except Exception:
+    FFMPEG_PATH = 'ffmpeg'  # Fallback to system ffmpeg
+
 logger = logging.getLogger(__name__)
 
 class YouTubeConverter:
@@ -43,6 +50,8 @@ class YouTubeConverter:
             'extract_flat': False,
             # android_vr client bypasses PO Token requirement (avoids HTTP 403)
             'extractor_args': {'youtube': {'player_client': ['android_vr']}},
+            # Point yt-dlp to the bundled imageio-ffmpeg binary
+            'ffmpeg_location': FFMPEG_PATH,
         }
     
     def get_video_info(self, url):
@@ -164,7 +173,7 @@ class YouTubeConverter:
                     status_callback['message'] = 'Cropping audio...'
                 
                 cropped_file = os.path.join(self.downloads_dir, f'cropped_{os.path.basename(mp3_file)}')
-                ffmpeg_cmd = ['ffmpeg', '-y', '-i', mp3_file]
+                ffmpeg_cmd = [FFMPEG_PATH, '-y', '-i', mp3_file]
                 if start_time is not None:
                     ffmpeg_cmd.extend(['-ss', str(start_time)])
                 if end_time is not None:
@@ -367,10 +376,10 @@ class YouTubeConverter:
         
         # Check FFmpeg
         try:
-            result = subprocess.run(['ffmpeg', '-version'], 
+            result = subprocess.run([FFMPEG_PATH, '-version'],
                                   capture_output=True, text=True, timeout=10)
             status['ffmpeg'] = result.returncode == 0
-        except:
+        except Exception:
             status['ffmpeg'] = False
         
         # Check yt-dlp
