@@ -2,12 +2,11 @@
 YouTube Converter Utility
 Handles downloading and conversion of YouTube videos to MP3/MP4.
 
-Strategy:
-  1. Try yt-dlp directly (with multiple player clients)
-  2. On bot-block failure, fall back to Invidious public API (no auth needed)
-     - Fetch video metadata and CDN stream URLs via Invidious REST API
-     - Download the raw audio stream with requests
-     - Convert to MP3/MP4 using bundled ffmpeg
+Fallback chain (fully automatic, no user action required):
+  1. yt-dlp with multiple YouTube player clients (tv_embedded, ios, android_vr)
+  2. Piped API  — reliable open-source YouTube proxy with stream URLs
+  3. Invidious  — dynamic instance list fetched live from api.invidious.io
+                  (filtered for api:true + currently up)
 """
 
 import os
@@ -26,18 +25,25 @@ try:
     import imageio_ffmpeg
     FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 except Exception:
-    FFMPEG_PATH = 'ffmpeg'  # Fallback to system ffmpeg
+    FFMPEG_PATH = 'ffmpeg'
 
 # ---------------------------------------------------------------------------
-# Public Invidious instances used as fallback when YouTube blocks the server
-# These are community-run proxies that don't require authentication
+# Piped API instances (more stable than Invidious for stream URLs)
 # ---------------------------------------------------------------------------
-INVIDIOUS_INSTANCES = [
-    'https://invidious.fdn.fr',
-    'https://yt.artemislena.eu',
+PIPED_INSTANCES = [
+    'https://pipedapi.kavin.rocks',
+    'https://pipedapi.adminforge.de',
+    'https://pipedapi.tokhmi.xyz',
+    'https://api.piped.yt',
+]
+
+# ---------------------------------------------------------------------------
+# Invidious fallback seed — used if we can't fetch the live list
+# ---------------------------------------------------------------------------
+INVIDIOUS_SEED = [
+    'https://inv.thepixora.com',    # api:true, cors:true — confirmed working
     'https://inv.nadeko.net',
     'https://invidious.nerdvpn.de',
-    'https://iv.datura.network',
 ]
 
 logger = logging.getLogger(__name__)
@@ -71,6 +77,8 @@ class YouTubeConverter:
             },
             'ffmpeg_location': FFMPEG_PATH,
         }
+        # Cache for dynamic Invidious instances fetched at runtime
+        self._invidious_instances_cache = None
 
     # -----------------------------------------------------------------------
     # Public API
@@ -79,9 +87,9 @@ class YouTubeConverter:
     def get_video_info(self, url):
         """
         Return video metadata dict or None.
-        Tries yt-dlp first; falls back to Invidious API automatically.
+        Fallback chain: yt-dlp → Piped API → Invidious (dynamic instances).
         """
-        # --- Primary: yt-dlp ---
+        # --- Tier 1: yt-dlp ---
         try:
             with yt_dlp.YoutubeDL(self.ydl_base_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -97,13 +105,19 @@ class YouTubeConverter:
                         'webpage_url': info.get('webpage_url', url),
                     }
         except Exception as e:
-            logger.warning(f"yt-dlp info extraction failed ({e}), trying Invidious…")
+            logger.warning(f"yt-dlp info extraction failed ({e}), trying Piped…")
 
-        # --- Fallback: Invidious REST API ---
         video_id = self._extract_video_id(url)
-        if video_id:
-            return self._get_info_via_invidious(video_id)
-        return None
+        if not video_id:
+            return None
+
+        # --- Tier 2: Piped API ---
+        info, _ = self._get_info_via_piped(video_id)
+        if info:
+            return info
+
+        # --- Tier 3: Invidious (live instance list) ---
+        return self._get_info_via_invidious(video_id)
 
     def convert_to_mp3(self, url, quality='192k', status_callback=None,
                        start_time=None, end_time=None):
@@ -113,22 +127,30 @@ class YouTubeConverter:
         """
         numeric_quality = quality.rstrip('kK')
 
-        # --- Primary: yt-dlp ---
+        # --- Tier 1: yt-dlp ---
         mp3_file = self._ytdlp_to_mp3(url, numeric_quality, status_callback)
         if mp3_file:
             return self._maybe_crop(mp3_file, start_time, end_time, status_callback)
 
-        # --- Fallback: Invidious ---
-        logger.warning("yt-dlp MP3 conversion blocked, falling back to Invidious…")
         video_id = self._extract_video_id(url)
-        if video_id:
-            mp3_file = self._invidious_to_mp3(video_id, numeric_quality, status_callback)
-            if mp3_file:
-                return self._maybe_crop(mp3_file, start_time, end_time, status_callback)
+        if not video_id:
+            return None
+
+        # --- Tier 2: Piped API ---
+        logger.warning("yt-dlp MP3 blocked, trying Piped API…")
+        mp3_file = self._piped_to_mp3(video_id, numeric_quality, status_callback)
+        if mp3_file:
+            return self._maybe_crop(mp3_file, start_time, end_time, status_callback)
+
+        # --- Tier 3: Invidious ---
+        logger.warning("Piped failed, trying Invidious…")
+        mp3_file = self._invidious_to_mp3(video_id, numeric_quality, status_callback)
+        if mp3_file:
+            return self._maybe_crop(mp3_file, start_time, end_time, status_callback)
 
         if status_callback:
             status_callback.update({'status': 'error', 'progress': 0,
-                                    'message': 'Conversion failed — YouTube is blocking this server.'})
+                                    'message': 'Conversion failed — all download methods blocked.'})
         return None
 
     def convert_to_mp4(self, url, quality='720p', status_callback=None):
@@ -136,20 +158,30 @@ class YouTubeConverter:
         Download as MP4.  Falls back to Invidious on bot-block.
         Returns path to the MP4 file, or None on failure.
         """
-        # --- Primary: yt-dlp ---
+        # --- Tier 1: yt-dlp ---
         mp4_file = self._ytdlp_to_mp4(url, quality, status_callback)
         if mp4_file:
             return mp4_file
 
-        # --- Fallback: Invidious ---
-        logger.warning("yt-dlp MP4 download blocked, falling back to Invidious…")
         video_id = self._extract_video_id(url)
-        if video_id:
-            return self._invidious_to_mp4(video_id, quality, status_callback)
+        if not video_id:
+            return None
+
+        # --- Tier 2: Piped ---
+        logger.warning("yt-dlp MP4 blocked, trying Piped…")
+        mp4_file = self._piped_to_mp4(video_id, quality, status_callback)
+        if mp4_file:
+            return mp4_file
+
+        # --- Tier 3: Invidious ---
+        logger.warning("Piped failed, trying Invidious for MP4…")
+        mp4_file = self._invidious_to_mp4(video_id, quality, status_callback)
+        if mp4_file:
+            return mp4_file
 
         if status_callback:
             status_callback.update({'status': 'error', 'progress': 0,
-                                    'message': 'Download failed — YouTube is blocking this server.'})
+                                    'message': 'Download failed — all download methods blocked.'})
         return None
 
     # -----------------------------------------------------------------------
@@ -231,12 +263,179 @@ class YouTubeConverter:
             return None
 
     # -----------------------------------------------------------------------
-    # Invidious fallback helpers
+    # Piped API helpers (Tier 2 fallback)
     # -----------------------------------------------------------------------
 
+    def _get_info_via_piped(self, video_id):
+        """Fetch video info + stream data via Piped API. Returns (info_dict, raw_data) or (None, None)."""
+        for instance in PIPED_INSTANCES:
+            try:
+                r = requests.get(f'{instance}/streams/{video_id}', timeout=10,
+                                 headers={'User-Agent': 'Mozilla/5.0'})
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get('error'):
+                        continue
+                    logger.info(f"Piped info OK via {instance}")
+                    info = {
+                        'title': data.get('title', 'Unknown Title'),
+                        'duration': data.get('duration', 0),
+                        'thumbnail': data.get('thumbnailUrl', ''),
+                        'uploader': data.get('uploader', 'Unknown Uploader'),
+                        'view_count': data.get('views', 0),
+                        'upload_date': '',
+                        'description': (data.get('description') or '')[:200],
+                        'webpage_url': f'https://www.youtube.com/watch?v={video_id}',
+                    }
+                    return info, data
+            except Exception as e:
+                logger.warning(f"Piped info failed ({instance}): {e}")
+        return None, None
+
+    def _piped_to_mp3(self, video_id, numeric_quality, status_callback):
+        """Download best audio via Piped API stream URL, convert to MP3 with ffmpeg."""
+        if status_callback:
+            status_callback.update({'status': 'downloading', 'progress': 15,
+                                    'message': 'Connecting via Piped mirror…'})
+        for instance in PIPED_INSTANCES:
+            try:
+                r = requests.get(f'{instance}/streams/{video_id}', timeout=10,
+                                 headers={'User-Agent': 'Mozilla/5.0'})
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                if data.get('error'):
+                    continue
+
+                audio_streams = data.get('audioStreams', [])
+                if not audio_streams:
+                    continue
+                # Pick highest quality audio stream
+                audio_streams.sort(key=lambda x: x.get('bitrate', 0), reverse=True)
+                stream_url = audio_streams[0].get('url', '')
+                if not stream_url:
+                    continue
+
+                logger.info(f"Piped audio stream from {instance}, downloading…")
+                if status_callback:
+                    status_callback.update({'progress': 40, 'message': 'Downloading audio stream…'})
+
+                raw_audio = self._stream_download(stream_url, suffix='.webm')
+                if not raw_audio:
+                    continue
+
+                if status_callback:
+                    status_callback.update({'status': 'converting', 'progress': 75,
+                                            'message': 'Converting to MP3…'})
+
+                title = data.get('title', f'audio_{video_id}')
+                safe_title = self._sanitize_filename(title)
+                mp3_path = os.path.join(self.downloads_dir, f'{safe_title}_{numeric_quality}k.mp3')
+                cmd = [FFMPEG_PATH, '-y', '-i', raw_audio,
+                       '-vn', '-ar', '44100', '-ac', '2', '-b:a', f'{numeric_quality}k', mp3_path]
+                result = subprocess.run(cmd, capture_output=True, timeout=300)
+                os.remove(raw_audio)
+
+                if result.returncode == 0 and os.path.exists(mp3_path):
+                    logger.info(f"Piped MP3 OK: {mp3_path}")
+                    if status_callback:
+                        status_callback.update({'status': 'completed', 'progress': 100,
+                                                'message': 'Conversion complete!'})
+                    return mp3_path
+                logger.error(f"FFmpeg error: {result.stderr.decode()[:300]}")
+
+            except Exception as e:
+                logger.warning(f"Piped MP3 failed ({instance}): {e}")
+        return None
+
+    def _piped_to_mp4(self, video_id, quality, status_callback):
+        """Download video via Piped API stream URL."""
+        if status_callback:
+            status_callback.update({'status': 'downloading', 'progress': 15,
+                                    'message': 'Connecting via Piped mirror…'})
+        q_num = int(quality.replace('p', ''))
+        for instance in PIPED_INSTANCES:
+            try:
+                r = requests.get(f'{instance}/streams/{video_id}', timeout=10,
+                                 headers={'User-Agent': 'Mozilla/5.0'})
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                if data.get('error'):
+                    continue
+
+                video_streams = data.get('videoStreams', [])
+                # Pick best stream at or below requested quality, with audio
+                best = None
+                for vs in sorted(video_streams, key=lambda x: x.get('height', 0), reverse=True):
+                    if vs.get('height', 0) <= q_num and vs.get('videoOnly') is False:
+                        best = vs
+                        break
+                if not best and video_streams:
+                    best = sorted(video_streams, key=lambda x: x.get('height', 0), reverse=True)[0]
+                if not best:
+                    continue
+
+                stream_url = best.get('url', '')
+                if not stream_url:
+                    continue
+
+                if status_callback:
+                    status_callback.update({'progress': 40, 'message': 'Downloading video stream…'})
+
+                raw_video = self._stream_download(stream_url, suffix='.mp4')
+                if not raw_video:
+                    continue
+
+                title = data.get('title', f'video_{video_id}')
+                safe_title = self._sanitize_filename(title)
+                mp4_path = os.path.join(self.downloads_dir, f'{safe_title}_{quality}.mp4')
+                cmd = [FFMPEG_PATH, '-y', '-i', raw_video, '-c', 'copy', mp4_path]
+                result = subprocess.run(cmd, capture_output=True, timeout=300)
+                os.remove(raw_video)
+
+                if result.returncode == 0 and os.path.exists(mp4_path):
+                    logger.info(f"Piped MP4 OK: {mp4_path}")
+                    if status_callback:
+                        status_callback.update({'status': 'completed', 'progress': 100,
+                                                'message': 'Download complete!'})
+                    return mp4_path
+
+            except Exception as e:
+                logger.warning(f"Piped MP4 failed ({instance}): {e}")
+        return None
+
+    # -----------------------------------------------------------------------
+    # Invidious helpers (Tier 3 fallback — dynamic instance list)
+    # -----------------------------------------------------------------------
+
+    def _get_live_invidious_instances(self):
+        """Fetch currently-online Invidious instances with API enabled from the official registry."""
+        if self._invidious_instances_cache is not None:
+            return self._invidious_instances_cache
+        try:
+            r = requests.get('https://api.invidious.io/instances.json', timeout=8)
+            if r.status_code == 200:
+                live = []
+                for name, info in r.json():
+                    if (info.get('type') == 'https'
+                            and info.get('api') is True
+                            and info.get('monitor')
+                            and not info['monitor'].get('down', True)):
+                        live.append(info['uri'])
+                if live:
+                    logger.info(f"Fetched {len(live)} live Invidious instances with API")
+                    self._invidious_instances_cache = live
+                    return live
+        except Exception as e:
+            logger.warning(f"Could not fetch live Invidious list: {e}")
+        # Fall back to seed list
+        self._invidious_instances_cache = INVIDIOUS_SEED
+        return INVIDIOUS_SEED
+
     def _get_info_via_invidious(self, video_id):
-        """Fetch video metadata from a public Invidious instance."""
-        for instance in INVIDIOUS_INSTANCES:
+        """Fetch video metadata from a live Invidious instance with API enabled."""
+        for instance in self._get_live_invidious_instances():
             try:
                 r = requests.get(f'{instance}/api/v1/videos/{video_id}',
                                  timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
@@ -271,7 +470,7 @@ class YouTubeConverter:
             status_callback.update({'status': 'downloading', 'progress': 15,
                                     'message': 'Connecting via mirror server…'})
 
-        for instance in INVIDIOUS_INSTANCES:
+        for instance in self._get_live_invidious_instances():
             try:
                 r = requests.get(f'{instance}/api/v1/videos/{video_id}',
                                  timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
@@ -341,7 +540,7 @@ class YouTubeConverter:
                                     'message': 'Connecting via mirror server…'})
         q_num = int(quality.replace('p', ''))
 
-        for instance in INVIDIOUS_INSTANCES:
+        for instance in self._get_live_invidious_instances():
             try:
                 r = requests.get(f'{instance}/api/v1/videos/{video_id}',
                                  timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
@@ -498,9 +697,9 @@ class YouTubeConverter:
             status['yt_dlp'] = True
         except ImportError:
             pass
-        # Quick Invidious connectivity check
+        # Quick Piped connectivity check
         try:
-            r = requests.get(f'{INVIDIOUS_INSTANCES[0]}/api/v1/stats', timeout=5)
+            r = requests.get(f'{PIPED_INSTANCES[0]}/streams/dQw4w9WgXcQ', timeout=5)
             status['invidious'] = r.status_code == 200
         except Exception:
             pass
